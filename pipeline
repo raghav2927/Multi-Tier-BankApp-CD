@@ -1,0 +1,100 @@
+pipeline {
+    agent any
+    parameters {
+        string(name: "DOCKER_TAG", defaultValue: 'latest', description: 'Docker tag')
+    }
+    tools {
+        maven "maven3"
+    }
+    environment {
+        SCANNER_HOME = tool 'mysonar'
+    }
+    stages {
+        stage("Clean") {
+            steps {
+                cleanWs()
+            }
+        }
+        stage("Checkout Code") {
+            steps {
+                git branch: 'main', url: 'https://github.com/Praveenchoudary/Multi-Tier-With-Database.git'
+            }
+        }
+        stage("Build") {
+            steps {
+                sh "mvn clean package"
+            }
+        }
+        stage("Sonarqube Analysis") {
+            steps {
+                withSonarQubeEnv('mysonar') {
+                    sh "$SCANNER_HOME/bin/sonar-scanner -Dsonar.projectName=multitier -Dsonar.projectKey=multitierr -Dsonar.java.binaries=target"
+                }
+            }
+        }
+        stage("OWASP Dependency Check") {
+            steps {
+                dependencyCheck additionalArguments: '--scan ./ --disableYarnAudit --disableNodeAudit', odcInstallation: 'DP-Check'
+                dependencyCheckPublisher pattern: '**/dependency-check-report.xml'
+            }
+        }
+        stage("Build Docker Image") {
+            steps {
+                sh "docker build -t praveen22233/bankapp:${DOCKER_TAG} ."
+            }
+        }
+        stage("Trivy File System Scan") {
+            steps {
+                echo "Scanning the file system for vulnerabilities..."
+                sh "trivy fs . > trivyfile.txt"
+            }
+        }
+        stage("Image Scan") {
+            steps {
+                sh "trivy image praveen22233/bankapp:${DOCKER_TAG}"
+            }
+        }
+        stage("Push Docker Image") {
+            steps {
+                script {
+                    withDockerRegistry(credentialsId: 'dockerhub') {
+                        sh "docker push praveen22233/bankapp:${DOCKER_TAG}"
+                    }
+                }
+            }
+        }
+        stage('Update YAML Manifest in Other Repo') {
+            steps {
+                script {
+                    withCredentials([usernamePassword(credentialsId: 'git-cred', usernameVariable: 'GIT_USER', passwordVariable: 'GIT_PASS')]) {
+                        sh """
+                        # Clone the repository
+                        git clone https://${GIT_USER}:${GIT_PASS}@github.com/Praveenchoudary/Multi-Tier-BankApp-CD.git
+                        cd Multi-Tier-BankApp-CD
+                        
+                        # Ensure we are inside the cloned repository
+                        echo "Current Directory: \$(pwd)"
+                        ls -l bankapp
+                        
+                        # Update the YAML file with the new Docker image tag
+                        sed -i 's|image: .*|image: praveen22233/bankapp:${DOCKER_TAG}|' bankapp/bankapp-ds.yml
+                        
+                        # Display the updated YAML file contents
+                        echo "Updated YAML file contents:"
+                        cat bankapp/bankapp-ds.yml
+                        
+                        # Configure Git for committing changes
+                        git config user.email "office@devopsshack.com"
+                        git config user.name "Praveenchoudary"
+                        
+                        # Commit and push the updated YAML file
+                        git add bankapp/bankapp-ds.yml
+                        git commit -m "Update image tag to ${DOCKER_TAG}"
+                        git push origin main
+                        """
+                    }
+                }
+            }
+        }
+    }
+}
